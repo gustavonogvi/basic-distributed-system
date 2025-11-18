@@ -1,78 +1,61 @@
 import socket
 import pickle
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 
+PORTS = [8001, 8002, 8003, 8004, 8005, 8006]
 
-NUM_SERVERS = 3
-SERVER_ADDRESSES = [
-    ("localhost", 8001),
-    ("localhost", 8002),
-    ("localhost", 8003)
-]
-
-
-def generate_matrizes():
-    rows_A = int(input("Número de linhas da matriz A: "))
-    cols_A = int(input("Número de colunas da matriz A: "))
-    
-    cols_B = int(input("Número de colunas da matriz B: "))
-    print()
-
-    A = np.random.randint(0, 10, (rows_A, cols_A))
-    B = np.random.randint(0, 10, (cols_A, cols_B))
-
-    return A, B
-
-
-def split_matriz(A, num_parts):
-    return np.array_split(A, num_parts)
-
-
-def send_to_server(server_address, subA, B):
+def is_server_alive(port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.2)
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect(server_address)
-            data = {"A_sub": subA, "B": B}
-            serialized_data = pickle.dumps(data)
+        s.connect(("127.0.0.1", port))
+        s.close()
+        return True
+    except:
+        return False
 
-            # Envia os dados
-            s.sendall(serialized_data)
+def send_submatrix(port, A_sub, B):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(("127.0.0.1", port))
 
-            # Recebe resultado parcial
-            result_data = s.recv(100000)
-            C_sub = pickle.loads(result_data)
+        payload = pickle.dumps({"A_sub": A_sub, "B": B})
+        s.sendall(payload)
 
-            print(f"Resultado parcial recebido de {server_address}: shape {C_sub.shape}")
-            return C_sub
+        result = pickle.loads(s.recv(500000))
+        s.close()
 
-    except ConnectionRefusedError:
-        print(f"Servidor {server_address} não está disponível!")
+        print(f"Resposta recebida do servidor {port}")
+        return result
+
+    except:
+        print(f"Falha no servidor {port}")
         return None
 
-
 def main():
-    print("=== CLIENTE DE MULTIPLICAÇÃO DISTRIBUÍDA ===\n")
+    print("Detectando servidores ativos...")
+    active = [p for p in PORTS if is_server_alive(p)]
+    print("Servidores encontrados:", active)
 
-    A, B = generate_matrizes()
-    print("Matriz A:\n", A, "\n")
-    print("Matriz B:\n", B, "\n")
+    rows = int(input("Linhas de A: "))
+    cols = int(input("Colunas de A: "))
+    colsB = int(input("Colunas de B: "))
 
-    submatrices = split_matriz(A, NUM_SERVERS)
-    print(f"\nMatriz A dividida em {NUM_SERVERS} partes.\n")
+    A = np.random.randint(0, 10, (rows, cols))
+    B = np.random.randint(0, 10, (cols, colsB))
 
-    partial_results = []
+    submatrices = np.array_split(A, len(active))
 
-    for i, server in enumerate(SERVER_ADDRESSES):
-        print(f"Enviando submatriz {i+1}/{NUM_SERVERS}...")
-        C_sub = send_to_server(server, submatrices[i], B)
+    with ThreadPoolExecutor(max_workers=len(active)) as ex:
+        futures = [ex.submit(send_submatrix, port, submatrices[i], B) 
+                   for i, port in enumerate(active)]
 
-        if C_sub is not None:
-            partial_results.append(C_sub)
+    results = [f.result() for f in futures if f.result() is not None]
+    C = np.vstack(results)
 
-    # Junta os resultados parciais
-    C = np.vstack(partial_results)
-
-    print("\n====== MATRIZ RESULTANTE C ======")
+    print("\nMatriz resultante C:")
     print(C)
 
 

@@ -1,42 +1,43 @@
 import socket
 import pickle
 import numpy as np
+import sys
+import time
 
+def run_server(port, log_queue):
+    HOST = "127.0.0.1"
 
-def multiplicar_submatrix(data):
-    A_sub = data["A_sub"]
-    B = data["B"]
-    C_sub = A_sub@B
-    return C_sub
+    def log(msg):
+        log_queue.put((port, msg))
 
+    log(f"Servidor iniciado na porta {port}")
 
-def start_server(port):
-    HOST = "localhost"
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((HOST, port))
         s.listen()
-        print(f"Servidor ativo em {HOST}:{port} aguardando conexões...")
+        log(f"Aguardando conexões...")
+    except Exception as e:
+        log(f"Erro ao iniciar servidor: {e}")
+        return
 
-        while True:
+    while True:
+        try:
             conn, addr = s.accept()
-            with conn:
-                print(f"Conexão recebida de {addr}")
+            log(f"Conexão recebida de {addr}")
 
-                # Receber dados
-                data = conn.recv(100000)
-                data = pickle.loads(data)
+            data = conn.recv(500000)
+            data = pickle.loads(data)
 
-                # Multiplicar
-                result = multiplicar_submatrix(data)
+            A_sub = data["A_sub"]
+            B = data["B"]
 
-                # Enviar resultado de volta
-                serialized = pickle.dumps(result)
-                conn.sendall(serialized)
+            C = A_sub @ B
+            conn.sendall(pickle.dumps(C))
 
-                print(f"Resultado parcial enviado para o cliente. Shape: {result.shape}")
+            log(f"Submatriz processada. Resultado: {C.shape}")
 
-
-if __name__ == "__main__":
-    port = int(input("Informe a porta deste servidor (8001, 8002 ou 8003): "))
-    start_server(port)
+        except Exception as e:
+            log(f"Erro: {e}")
+            time.sleep(0.1)
