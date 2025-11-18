@@ -3,43 +3,72 @@ import pickle
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
+"""
+Cliente automático que carrega A.npy e B.npy e distribui submatrizes.
+Usa protocolo com prefixo de 8 bytes para enviar/receber.
+"""
 
-def run_client(server_ports, queue):
+def log(queue, msg):
+    queue.put(("CLIENT", msg))
 
-    def log(msg):
-        queue.put(("CLIENT", msg))
+def send_with_size(sock, data_bytes):
+    size = len(data_bytes)
+    sock.sendall(size.to_bytes(8, "big"))
+    sock.sendall(data_bytes)
 
-    def send(port, A_sub, B):
-        log(f"Enviando submatriz para {port}: {A_sub.shape}")
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(3)
+def recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise EOFError("Conexão fechada ao ler dados")
+        buf += chunk
+    return buf
+
+def recv_with_size(sock):
+    header = recv_exact(sock, 8)
+    size = int.from_bytes(header, "big")
+    payload = recv_exact(sock, size)
+    return payload
+
+def send(port, A_sub, B, queue):
+    log(queue, f"Enviando submatriz para {port}: {A_sub.shape}")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(10)
             s.connect(("127.0.0.1", port))
 
-            s.sendall(pickle.dumps({"A_sub": A_sub, "B": B}))
+            payload = pickle.dumps({"A_sub": A_sub, "B": B}, protocol=pickle.HIGHEST_PROTOCOL)
 
-            result = pickle.loads(s.recv(500000))
-            log(f"Resposta recebida de {port}: {result.shape}")
+            # enviar com prefixo de tamanho
+            send_with_size(s, payload)
+
+            # receber com prefixo de tamanho
+            resp_bytes = recv_with_size(s)
+            result = pickle.loads(resp_bytes)
+
+            log(queue, f"Resposta recebida de {port}: {result.shape}")
             return result
 
-        except:
-            log(f"Falha ao comunicar com {port}")
-            return None
+    except Exception as e:
+        log(queue, f"Falha ao comunicar com {port}: {e}")
+        return None
 
+def run_client(server_ports, queue):
     rowsA, colsA, colsB = 6, 4, 5
     A = np.load("A.npy")
     B = np.load("B.npy")
 
-    log(f"Matriz A carregada: {A.shape}")
-    log(f"Matriz B carregada: {B.shape}")
+    log(queue, f"Matriz A carregada: {A.shape}")
+    log(queue, f"Matriz B carregada: {B.shape}")
 
     subs = np.array_split(A, len(server_ports))
-    log("Submatrizes preparadas")
+    log(queue, "Submatrizes preparadas")
 
     with ThreadPoolExecutor(max_workers=len(server_ports)) as ex:
         futures = [
-            ex.submit(send, port, subs[i], B) 
-            for i, port in enumerate(server_ports)
+            ex.submit(send, server_ports[i], subs[i], B, queue) 
+            for i in range(len(server_ports))
         ]
 
     results = [f.result() for f in futures if f.result() is not None]
@@ -47,6 +76,6 @@ def run_client(server_ports, queue):
     if results:
         C = np.vstack(results)
         queue.put(("RESULT", C))
-        log(f"Matriz final construída: {C.shape}")
+        log(queue, f"Matriz final construída: {C.shape}")
     else:
-        log("Nenhum resultado recebido")
+        log(queue, "Nenhum resultado recebido")

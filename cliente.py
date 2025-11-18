@@ -15,23 +15,48 @@ def is_server_alive(port):
     except:
         return False
 
+def send_with_size(sock, data_bytes):
+    size = len(data_bytes)
+    sock.sendall(size.to_bytes(8, "big"))
+    sock.sendall(data_bytes)
+
+def recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise EOFError("Conexão fechada ao ler dados")
+        buf += chunk
+    return buf
+
+def recv_with_size(sock):
+    header = recv_exact(sock, 8)
+    size = int.from_bytes(header, "big")
+    payload = recv_exact(sock, size)
+    return payload
+
 def send_submatrix(port, A_sub, B):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(10)
         s.connect(("127.0.0.1", port))
 
-        payload = pickle.dumps({"A_sub": A_sub, "B": B})
-        s.sendall(payload)
+        payload_obj = {"A_sub": A_sub, "B": B}
+        payload = pickle.dumps(payload_obj, protocol=pickle.HIGHEST_PROTOCOL)
 
-        result = pickle.loads(s.recv(500000))
+        # enviar com prefixo de tamanho
+        send_with_size(s, payload)
+
+        # receber resposta (com prefixo de tamanho)
+        resp_bytes = recv_with_size(s)
+        result = pickle.loads(resp_bytes)
         s.close()
 
         print(f"Resposta recebida do servidor {port}")
         return result
 
-    except:
-        print(f"Falha no servidor {port}")
+    except Exception as e:
+        print(f"Falha no servidor {port}: {e}")
         return None
 
 def main():
