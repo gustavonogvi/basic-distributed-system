@@ -3,11 +3,6 @@ import pickle
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 
-"""
-Cliente automático que carrega A.npy e B.npy e distribui submatrizes.
-Usa protocolo com prefixo de 8 bytes para enviar/receber.
-"""
-
 def log(queue, msg):
     queue.put(("CLIENT", msg))
 
@@ -76,6 +71,6 @@ def run_client(server_ports, queue):
     if results:
         C = np.vstack(results)
         queue.put(("RESULT", C))
-        log(queue, f"Matriz final construída: {C.shape}")
+        log(queue, f"Matriz final construída: {C.shape}") 
     else:
         log(queue, "Nenhum resultado recebido")
