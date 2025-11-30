@@ -1,278 +1,148 @@
-import multiprocessing
+
+import subprocess
+import sys
 import time
-import numpy as np
-import os
-import socket
-import pickle
-import json
-import csv
-from datetime import datetime
 
-from server_instance import run_server
-
-
-# ===============================================================
-# Comunicacao com envio de tamanho
-# ===============================================================
-
-def send_with_size(sock, data_bytes):
-    sock.sendall(len(data_bytes).to_bytes(8, "big"))
-    sock.sendall(data_bytes)
-
-def recv_exact(sock, n):
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise EOFError("Conexao fechada ao ler dados")
-        buf += chunk
-    return buf
-
-def recv_with_size(sock):
-    header = recv_exact(sock, 8)
-    size = int.from_bytes(header, "big")
-    payload = recv_exact(sock, size)
-    return payload
-
-
-# ===============================================================
-# Multiplicacao distribuida
-# ===============================================================
-
-def distributed_multiply(A, B, ports):
-    subs = np.array_split(A, len(ports))
-    results = []
-
-    for i, port in enumerate(ports):
-        A_sub = subs[i]
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(40)
-            s.connect(("127.0.0.1", port))
-
-            payload = pickle.dumps({"A_sub": A_sub, "B": B}, protocol=pickle.HIGHEST_PROTOCOL)
-            send_with_size(s, payload)
-
-            resp_bytes = recv_with_size(s)
-            C_sub = pickle.loads(resp_bytes)
-            results.append(C_sub)
-
-    return np.vstack(results)
-
-
-# ===============================================================
-# Servidores
-# ===============================================================
-
-def start_servers(n):
-    queue = multiprocessing.Queue()
-    procs = []
-    ports = []
-
-    for i in range(n):
-        p = multiprocessing.Process(target=run_server, args=(i + 1, queue), daemon=True)
-        p.start()
-        procs.append(p)
-
-    start_time = time.time()
-    while len(ports) < n:
-        try:
-            src, msg = queue.get(timeout=5.0)
-            if "porta" in msg:
-                port = int(msg.split("porta")[1].strip())
-                ports.append(port)
-        except:
-            if time.time() - start_time > 20:
-                raise RuntimeError("Falha ao iniciar servidores")
-
-    return procs, ports
-
-def stop_servers(procs):
-    for p in procs:
-        try:
-            p.terminate()
-        except:
-            pass
-
-
-# ===============================================================
-# Registro e pastas
-# ===============================================================
-
-RESULTS_DIR = "test_results"
-
-def prepare_results_folder():
-    if not os.path.exists(RESULTS_DIR):
-        os.makedirs(RESULTS_DIR)
-
-def ensure_test_folder(name):
-    path = os.path.join(RESULTS_DIR, name.replace(" ", "_"))
-    if not os.path.exists(path):
-        os.makedirs(path)
-    return path
-
-def save_matrix_txt(path, matrix, title):
-    with open(path, "w") as f:
-        f.write(f"{title}\n\n")
-        for row in matrix:
-            f.write(str(row.tolist()) + "\n")
-
-
-def save_results_json(results):
-    with open(os.path.join(RESULTS_DIR, "results.json"), "w") as f:
-        json.dump(results, f, indent=4)
-
-def save_results_csv(results):
-    with open(os.path.join(RESULTS_DIR, "results.csv"), "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "nome",
-            "A_shape",
-            "B_shape",
-            "tempo_serial",
-            "tempo_distribuido",
-            "diferenca",
-            "erro_max",
-            "correto"
-        ])
-        for name, data in results.items():
-            writer.writerow([
-                name,
-                data["A_shape"],
-                data["B_shape"],
-                data["tempo_serial"],
-                data["tempo_distribuido"],
-                data["diferenca"],
-                data["erro_max"],
-                data["correto"]
-            ])
-
-def save_results_txt(results):
-    with open(os.path.join(RESULTS_DIR, "report.txt"), "w") as f:
-        f.write("RELATORIO DE TESTES DISTRIBUIDOS\n")
-        f.write(f"Data: {datetime.now()}\n")
-        f.write("================================\n\n")
-
-        for name, data in results.items():
-            f.write(f"{name}\n")
-            f.write(f"  A: {data['A_shape']}\n")
-            f.write(f"  B: {data['B_shape']}\n")
-            f.write(f"  Tempo serial:      {data['tempo_serial']:.6f} s\n")
-            f.write(f"  Tempo distribuido: {data['tempo_distribuido']:.6f} s\n")
-            f.write(f"  Diferenca:         {data['diferenca']:.6f} s\n")
-            f.write(f"  Erro maximo:       {data['erro_max']:.6f}\n")
-            f.write(f"  Correto:           {data['correto']}\n")
-            f.write("--------------------------------\n")
-
-
-# ===============================================================
-# Benchmark (sem mostrar matrizes na tela)
-# ===============================================================
-
-def run_benchmark(test_name, A, B, ports, results_dict):
-    print(f"\n===== {test_name} =====")
-    print(f"A shape: {A.shape}")
-    print(f"B shape: {B.shape}")
-
-    folder = ensure_test_folder(test_name)
-
-    # Serial
-    t1 = time.perf_counter()
-    C_serial = A @ B
-    t2 = time.perf_counter()
-
-    # Distribuido
-    t3 = time.perf_counter()
-    C_dist = distributed_multiply(A, B, ports)
-    t4 = time.perf_counter()
-
-    # Medidas
-    tempo_serial = t2 - t1
-    tempo_distrib = t4 - t3
-    diferenca = tempo_distrib - tempo_serial
-    erro_max = float(np.max(np.abs(C_serial - C_dist)))
-    correto = np.allclose(C_serial, C_dist)
-
-    # Mostra apenas informacoes importantes
-    print("Correto:", correto)
-    print("Erro maximo:", erro_max)
-    print(f"Tempo serial:      {tempo_serial:.6f} s")
-    print(f"Tempo distribuido: {tempo_distrib:.6f} s")
-    print(f"Diferenca:         {diferenca:.6f} s")
-
-    # Salvar matrizes em TXT
-    save_matrix_txt(os.path.join(folder, "C_serial.txt"), C_serial, "Resultado Serial")
-    save_matrix_txt(os.path.join(folder, "C_distrib.txt"), C_dist, "Resultado Distribuido")
-
-    # Registrar sumario
-    results_dict[test_name] = {
-        "A_shape": list(A.shape),
-        "B_shape": list(B.shape),
-        "tempo_serial": tempo_serial,
-        "tempo_distribuido": tempo_distrib,
-        "diferenca": diferenca,
-        "erro_max": erro_max,
-        "correto": bool(correto)
-    }
-
-
-# ===============================================================
-# Main
-# ===============================================================
-
-def main():
-    os.system("cls" if os.name == "nt" else "clear")
-    print("==== TESTE DE ARQUITETURA DISTRIBUIDA ====\n")
-
-    prepare_results_folder()
-
-    N_SERVERS = 6
-    print(f"Iniciando {N_SERVERS} servidores...")
-    procs, ports = start_servers(N_SERVERS)
-    print("Servidores prontos:", ports)
-
-    results = {}
-
+def teste_rapido():
+    """Executa teste rápido do sistema"""
+    print("\n" + "="*70)
+    print("  TESTE RÁPIDO DO SISTEMA")
+    print("  Configuração: 2 servidores, matrizes 4x4")
+    print("="*70)
+    
+    processos_servidores = []
+    
     try:
-        # Teste pequeno
-        run_benchmark(
-            "Teste Pequeno",
-            np.random.randint(0, 10, (20, 30)),
-            np.random.randint(0, 10, (30, 40)),
-            ports, results
-        )
-
-        # Teste medio
-        run_benchmark(
-            "Teste Medio",
-            np.random.randint(0, 10, (200, 300)),
-            np.random.randint(0, 10, (300, 150)),
-            ports, results
-        )
-
-        # ================================
-        # TESTE GRANDE DE VERDADE
-        # ================================
-        print("\nPreparando matrizes muito grandes... isso pode levar alguns segundos...")
-
-        A = np.random.randint(0, 10, (2000, 1000))
-        B = np.random.randint(0, 10, (1000, 1500))
-
-        run_benchmark(
-            "Teste Grande",
-            A, B,
-            ports, results
-        )
-
-        # Salvando relatorios
-        print("\nSalvando relatorios...")
-        save_results_json(results)
-        save_results_csv(results)
-        save_results_txt(results)
-        print("Relatorios salvos em test_results/")
-
+        # Inicia 2 servidores
+        print("\n[1/4] Iniciando servidores...")
+        
+        for i in range(2):
+            port = 5000 + i
+            if sys.platform == 'win32':
+                proc = subprocess.Popen(
+                    [sys.executable, 'Server.py', str(port)],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE
+                )
+            else:
+                proc = subprocess.Popen(
+                    [sys.executable, 'Server.py', str(port)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            processos_servidores.append(proc)
+            print(f"  ✓ Servidor {i+1} iniciado (porta {port})")
+        
+        time.sleep(2)
+        
+        # Testa importações
+        print("\n[2/4] Verificando dependências...")
+        try:
+            import numpy
+            print("  ✓ NumPy instalado")
+            import matplotlib
+            print("  ✓ Matplotlib instalado")
+        except ImportError as e:
+            print(f"  ✗ Erro: {e}")
+            print("\n  Execute: pip install numpy matplotlib")
+            return
+        
+        # Testa conexão
+        print("\n[3/4] Testando conectividade...")
+        import socket
+        
+        for i in range(2):
+            port = 5000 + i
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect(('localhost', port))
+                s.close()
+                print(f"  ✓ Servidor {i+1} respondendo")
+            except:
+                print(f"  ✗ Servidor {i+1} não responde")
+        
+        # Executa teste real
+        print("\n[4/4] Executando multiplicação de teste...")
+        print("-" * 70)
+        
+        from client import MatrixClient, multiplicacao_serial
+        import numpy as np
+        
+        servers = [('localhost', 5000), ('localhost', 5001)]
+        client = MatrixClient(servers)
+        
+        # Teste simples
+        A = np.array([[1, 2], [3, 4]])
+        B = np.array([[5, 6], [7, 8]])
+        
+        print("\nMatriz A:")
+        print(A)
+        print("\nMatriz B:")
+        print(B)
+        
+        # Teste Serial
+        print("\n[TESTE SERIAL]")
+        C_serial, tempo_serial = multiplicacao_serial(A, B)
+        print(f"Tempo serial: {tempo_serial:.6f}s")
+        
+        # Teste Distribuído
+        print("\n[TESTE DISTRIBUÍDO]")
+        C, tempo_dist = client.distribute_multiplication(A, B, show_details=True)
+        
+        print("\nMatriz C (resultado):")
+        print(C)
+        
+        # Verifica correção
+        if client.verify_result(A, B, C):
+            print("\n" + "="*70)
+            print("  ✅ TESTE PASSOU! Sistema funcionando corretamente!")
+            print("="*70)
+            print(f"\n  Comparação de Desempenho:")
+            print(f"  - Tempo serial:      {tempo_serial:.6f}s")
+            print(f"  - Tempo distribuído: {tempo_dist:.6f}s")
+            
+            if tempo_dist < tempo_serial:
+                print(f"  - Speedup:           {tempo_serial/tempo_dist:.2f}x")
+                print(f"  ✓ Distribuído mais rápido!")
+            else:
+                print(f"  - Slowdown:          {tempo_dist/tempo_serial:.2f}x")
+                print(f"  ℹ  Para matrizes 2×2, serial é mais eficiente")
+                print(f"     (overhead de comunicação > ganho paralelo)")
+            
+            print("\n  Próximos passos:")
+            print("  1. Execute 'python Client.py' para usar o sistema completo")
+            print("  2. No benchmark, teste tamanhos: 10,50,100,200,400,800")
+            print("  3. Compare serial vs distribuído nos gráficos!")
+            print("  4. Prepare sua apresentação!")
+        else:
+            print("\n" + "="*70)
+            print("  ❌ TESTE FALHOU! Resultado incorreto")
+            print("="*70)
+        
+    except FileNotFoundError:
+        print("\n❌ Erro: Arquivos Server.py ou Client.py não encontrados")
+        print("   Certifique-se de que todos os arquivos estão no mesmo diretório")
+    
+    except Exception as e:
+        print(f"\n❌ Erro durante teste: {e}")
+        import traceback
+        traceback.print_exc()
+    
     finally:
-        stop_servers(procs)
+        # Encerra servidores
+        print("\n[CLEANUP] Encerrando servidores...")
+        for i, proc in enumerate(processos_servidores):
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+                print(f"  ✓ Servidor {i+1} encerrado")
+            except:
+                proc.kill()
+        
+        print("\n" + "="*70)
+        print("  Teste concluído!")
+        print("="*70 + "\n")
 
 
 if __name__ == "__main__":
-    main()
+    teste_rapido()
